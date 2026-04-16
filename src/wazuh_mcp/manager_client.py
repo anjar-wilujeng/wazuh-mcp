@@ -36,7 +36,7 @@ class WazuhManagerClient:
         """Exchange basic auth → JWT token."""
         resp = await self._client.get(
             "/security/user/authenticate",
-            auth=(settings.wazuh_username, settings.wazuh_password),
+            auth=(settings.manager_username, settings.manager_password),
         )
         resp.raise_for_status()
         self._token = resp.json()["data"]["token"]

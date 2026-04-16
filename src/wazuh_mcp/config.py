@@ -33,9 +33,21 @@ class Settings(BaseSettings):
         alias="WAZUH_MANAGER_URL",
     )
 
-    # ── Auth (wajib — tidak ada default) ──────────────────────────
+    # ── Auth Indexer (port 9200) — wajib ─────────────────────────
     wazuh_username: str = Field(alias="WAZUH_USERNAME")
     wazuh_password: str = Field(alias="WAZUH_PASSWORD")
+
+    # ── Auth Manager (port 55000) — fallback ke Indexer jika kosong
+    wazuh_manager_username: str = Field(default="", alias="WAZUH_MANAGER_USERNAME")
+    wazuh_manager_password: str = Field(default="", alias="WAZUH_MANAGER_PASSWORD")
+
+    @property
+    def manager_username(self) -> str:
+        return self.wazuh_manager_username or self.wazuh_username
+
+    @property
+    def manager_password(self) -> str:
+        return self.wazuh_manager_password or self.wazuh_password
 
     # ── SSL ───────────────────────────────────────────────────────
     wazuh_verify_ssl: bool = Field(default=True, alias="WAZUH_VERIFY_SSL")
