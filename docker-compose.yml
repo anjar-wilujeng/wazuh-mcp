@@ -1,0 +1,54 @@
+# Wazuh MCP Server — sidecar di atas stack Wazuh yang sudah ada.
+# Jalankan: docker compose up -d
+
+services:
+  wazuh-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wazuh-mcp:latest
+    container_name: wazuh-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - wazuh_default
+    stdin_open: true
+    tty: false
+    volumes:
+      - ./certs:/certs:ro
+      - audit-logs:/var/log/wazuh-mcp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import wazuh_mcp; print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  audit-logs:
+    driver: local
+
+networks:
+  wazuh_default:
+    external: true
+    name: ${WAZUH_DOCKER_NETWORK:-wazuh_default}

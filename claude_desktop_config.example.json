@@ -1,0 +1,26 @@
+{
+  "_info": "Letakkan di: ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) atau %APPDATA%\\Claude\\claude_desktop_config.json (Windows). Restart Claude Desktop setelah edit.",
+
+  "mcpServers": {
+    "wazuh-soc": {
+      "command": "wazuh-mcp",
+      "env": {
+        "WAZUH_INDEXER_URL": "https://wazuh-master:9200",
+        "WAZUH_MANAGER_URL": "https://wazuh-master:55000",
+        "WAZUH_USERNAME": "admin",
+        "WAZUH_PASSWORD": "GANTI_PASSWORD_INI",
+        "WAZUH_VERIFY_SSL": "true",
+        "WAZUH_CLUSTER_NAME": "wazuh-cluster",
+        "WAZUH_MASTER_NODE": "wazuh-master",
+        "WAZUH_WORKER_NODE": "wazuh-worker",
+        "BLOCK_IP_DEFAULT_TIMEOUT": "3600",
+        "AUDIT_LOG_PATH": "/var/log/wazuh-mcp/audit.log",
+        "LOG_LEVEL": "INFO",
+
+        "_slack_note": "Opsional — hapus baris SLACK jika tidak digunakan",
+        "SLACK_BOT_TOKEN": "",
+        "SLACK_NOTIFY_CHANNEL": "#soc-notifications"
+      }
+    }
+  }
+}
