@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
@@ -55,6 +56,7 @@ app = Server("wazuh-mcp")
 
 # ── slack client (reuse across calls) ────────────────────────────────────────
 _slack_client = None
+_slack_http: httpx.AsyncClient | None = None
 
 
 def _get_slack_client():
@@ -63,6 +65,29 @@ def _get_slack_client():
         from slack_sdk.web.async_client import AsyncWebClient
         _slack_client = AsyncWebClient(token=settings.slack_bot_token)
     return _slack_client
+
+
+def _get_slack_http() -> httpx.AsyncClient:
+    global _slack_http
+    if _slack_http is None:
+        _slack_http = httpx.AsyncClient(timeout=10.0)
+    return _slack_http
+
+
+async def _slack_post_webhook(payload: dict[str, Any]) -> bool:
+    """POST payload ke Slack Incoming Webhook. Returns True jika sukses."""
+    if not settings.slack_webhook_url:
+        return False
+    try:
+        client = _get_slack_http()
+        resp = await client.post(settings.slack_webhook_url, json=payload)
+        if resp.status_code == 200 and resp.text.strip() == "ok":
+            return True
+        logger.warning("Slack webhook non-ok: %s %s", resp.status_code, resp.text[:200])
+        return False
+    except Exception as e:
+        logger.warning("Gagal POST Slack webhook: %s", e)
+        return False
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -80,27 +105,75 @@ def _validate_ip(ip: str) -> bool:
 
 
 async def _slack_notify(action: str, details: dict[str, Any], success: bool) -> None:
-    """Kirim notifikasi Slack setelah eksekusi (opsional)."""
+    """Kirim notifikasi Slack setelah eksekusi (opsional). Webhook diprioritaskan."""
     if not settings.slack_enabled:
         return
+    emoji = "✅" if success else "❌"
+    status = "BERHASIL" if success else "GAGAL"
+    detail_text = "\n".join(f"• *{k}:* `{v}`" for k, v in details.items())
+    text = f"{emoji} [{status}] {action}"
+    blocks = [{
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"{emoji} *Active Response {status}*\n*Aksi:* {action}\n{detail_text}",
+        },
+    }]
+
+    if settings.slack_delivery == "webhook":
+        await _slack_post_webhook({"text": text, "blocks": blocks})
+        return
+
     try:
         client = _get_slack_client()
-        emoji = "✅" if success else "❌"
-        status = "BERHASIL" if success else "GAGAL"
-        detail_text = "\n".join(f"• *{k}:* `{v}`" for k, v in details.items())
         await client.chat_postMessage(
             channel=settings.slack_notify_channel,
-            text=f"{emoji} [{status}] {action}",
-            blocks=[{
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"{emoji} *Active Response {status}*\n*Aksi:* {action}\n{detail_text}",
-                },
-            }],
+            text=text,
+            blocks=blocks,
         )
     except Exception as e:
         logger.warning("Gagal kirim Slack notifikasi: %s", e)
+
+
+# ── slack message chunking ───────────────────────────────────────────────────
+
+_SLACK_SECTION_LIMIT = 2900  # Slack section text limit is 3000; leave margin
+_SLACK_MAX_BLOCKS = 48       # Slack max 50 blocks; reserve 2 for header/context
+
+
+def _chunk_for_slack(text: str, limit: int = _SLACK_SECTION_LIMIT) -> list[str]:
+    """Split text into chunks ≤ limit, prefer paragraph then line boundaries."""
+    text = text.strip()
+    if len(text) <= limit:
+        return [text] if text else []
+    chunks: list[str] = []
+    buf = ""
+    for para in text.split("\n\n"):
+        candidate = f"{buf}\n\n{para}" if buf else para
+        if len(candidate) <= limit:
+            buf = candidate
+            continue
+        if buf:
+            chunks.append(buf)
+            buf = ""
+        if len(para) <= limit:
+            buf = para
+            continue
+        # paragraph itself too long — break by lines
+        line_buf = ""
+        for line in para.split("\n"):
+            line_candidate = f"{line_buf}\n{line}" if line_buf else line
+            if len(line_candidate) <= limit:
+                line_buf = line_candidate
+            else:
+                if line_buf:
+                    chunks.append(line_buf)
+                line_buf = line[:limit]
+        if line_buf:
+            buf = line_buf
+    if buf:
+        chunks.append(buf)
+    return chunks
 
 
 # ── tool definitions ──────────────────────────────────────────────────────────
@@ -299,6 +372,41 @@ async def list_tools() -> list[types.Tool]:
         ),
 
         types.Tool(
+            name="send_alerts_to_slack",
+            description=(
+                "Post analisis/ringkasan yang sudah KAMU (LLM) tulis ke Slack channel via bot. "
+                "Tool ini TIDAK melakukan query — kamu yang harus query_alerts / "
+                "get_alert_summary / query_vulnerabilities dulu, analisa pattern "
+                "(threat categorization, top agents, affected CVEs, recommended actions), "
+                "lalu kirim narrative jadi ke tool ini. "
+                "Format teks: Slack mrkdwn — `*bold*`, `_italic_`, `` `code` ``, "
+                "bullet `•` / `-`. Untuk broadcast @channel: tulis sendiri `<!channel>` "
+                "di awal `text` (hanya untuk alert kritikal). Mention user: `<@U123>`. "
+                "Struktur yang disarankan: Summary → Alert Volume → Key Threats → "
+                "Top Agents → Node Distribution → Recommended Actions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "Isi pesan lengkap dalam Slack mrkdwn format. "
+                            "Kamu bebas menulis narrative panjang; tool akan auto-chunk "
+                            "kalau melebihi batas Slack per-block."
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Judul header. Default: 'Wazuh Security Alert Summary'.",
+                        "default": "Wazuh Security Alert Summary",
+                    },
+                },
+                "required": ["text"],
+            },
+        ),
+
+        types.Tool(
             name="list_agents",
             description=(
                 "Tampilkan semua agents aktif (dari master dan worker node). "
@@ -413,8 +521,85 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         case "block_ip":
             return await _handle_block_ip(args)
 
+        case "send_alerts_to_slack":
+            return await _handle_send_alerts_to_slack(args)
+
         case _:
             raise ValueError(f"Tool tidak dikenal: {name}")
+
+
+async def _handle_send_alerts_to_slack(args: dict[str, Any]) -> dict[str, Any]:
+    """Post LLM-generated narrative ke Slack. Tool ini dumb-sender, tidak query apa pun."""
+    if not settings.slack_enabled:
+        return {
+            "status": "rejected",
+            "reason": (
+                "Slack belum dikonfigurasi. Set SLACK_WEBHOOK_URL "
+                "(atau SLACK_BOT_TOKEN + SLACK_NOTIFY_CHANNEL) di env."
+            ),
+        }
+
+    text = (args.get("text") or "").strip()
+    if not text:
+        return {"status": "rejected", "reason": "Field 'text' wajib diisi."}
+
+    title = args.get("title", "Wazuh Security Alert Summary")
+
+    body_chunks = _chunk_for_slack(text)
+    if len(body_chunks) > _SLACK_MAX_BLOCKS:
+        # Truncate with a note — gracefully rather than error
+        body_chunks = body_chunks[: _SLACK_MAX_BLOCKS - 1]
+        body_chunks.append("_...pesan dipotong; terlalu panjang untuk satu kiriman Slack._")
+
+    blocks: list[dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"🚨 {title}"[:150]}},
+        {"type": "context", "elements": [
+            {"type": "mrkdwn", "text": (
+                f"*Cluster:* `{settings.cluster_name}` · "
+                f"*Generated:* `{datetime.now(timezone.utc).isoformat(timespec='seconds')}`"
+            )},
+        ]},
+    ]
+    for chunk in body_chunks:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": chunk}})
+
+    fallback = f"🚨 {title}"
+    payload = {"text": fallback, "blocks": blocks}
+
+    delivered = False
+    error_detail: str | None = None
+    method = settings.slack_delivery
+    if method == "webhook":
+        delivered = await _slack_post_webhook(payload)
+        if not delivered:
+            error_detail = "webhook POST gagal (cek log server)."
+    elif method == "bot":
+        try:
+            client = _get_slack_client()
+            await client.chat_postMessage(
+                channel=settings.slack_notify_channel,
+                text=fallback,
+                blocks=blocks,
+            )
+            delivered = True
+        except Exception as e:
+            error_detail = f"{type(e).__name__}: {e}"
+            logger.warning("Gagal kirim via bot: %s", e)
+
+    audit_logger.info(
+        "ACTION=send_alerts_to_slack STATUS=%s METHOD=%s CHARS=%d BLOCKS=%d",
+        "success" if delivered else "failed", method, len(text), len(blocks),
+    )
+
+    result = {
+        "status": "sent" if delivered else "failed",
+        "delivery_method": method,
+        "chars_sent": len(text),
+        "blocks_sent": len(blocks),
+    }
+    if error_detail:
+        result["error"] = error_detail
+    return result
 
 
 async def _handle_block_ip(args: dict[str, Any]) -> dict[str, Any]:

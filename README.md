@@ -210,12 +210,20 @@ Claude: [eksekusi block_ip] IP 185.220.101.5 berhasil di-block di agents 001, 00
 Slack hanya digunakan untuk **notifikasi pasca-eksekusi**, bukan untuk approval.
 Approval tetap dilakukan manual di Claude Desktop.
 
+Dua cara konfigurasi — pilih salah satu:
+
 ```env
+# Opsi A (direkomendasikan): Incoming Webhook — channel fixed, simpel & aman
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
+
+# Opsi B: Bot token — bot harus di-invite ke channel
 SLACK_BOT_TOKEN=xoxb-xxx
 SLACK_NOTIFY_CHANNEL=#soc-notifications
 ```
 
-Scopes yang diperlukan: `chat:write`
+Scopes yang diperlukan untuk Opsi B: `chat:write`. Jika keduanya di-set, webhook diprioritaskan.
+
+Tool `send_alerts_to_slack` mengirim ringkasan alert (summary + top-N list) ke channel — pesan posting sebagai **bot/app**, bukan akun user, sehingga aman dari perspektif privasi.
 
 ---
 

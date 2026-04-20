@@ -19,7 +19,8 @@
         "AUDIT_LOG_PATH": "/var/log/wazuh-mcp/audit.log",
         "LOG_LEVEL": "INFO",
 
-        "_slack_note": "Opsional — hapus baris SLACK jika tidak digunakan",
+        "_slack_note": "Opsional — pilih webhook ATAU bot token, hapus yang tidak dipakai",
+        "SLACK_WEBHOOK_URL": "",
         "SLACK_BOT_TOKEN": "",
         "SLACK_NOTIFY_CHANNEL": "#soc-notifications"
       }
