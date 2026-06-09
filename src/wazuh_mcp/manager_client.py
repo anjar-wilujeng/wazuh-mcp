@@ -80,10 +80,20 @@ class WazuhManagerClient:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10), reraise=True)
     async def get_agents(self) -> list[dict[str, Any]]:
-        """List semua agents aktif (dari master + worker)."""
+        """List semua agents aktif (dari master + worker).
+
+        Pakai `select` agar payload dipangkas di sisi Wazuh (sebelum sampai ke
+        model): hanya field yang relevan untuk triase. Field operasional/redundan
+        (group_config_status, status_code, dateAdd, registerIP, manager, os.uname,
+        os.arch, dll) sengaja tidak diambil — memangkas ~65% ukuran respons.
+        """
         resp = await self._client.get(
             "/agents",
-            params={"status": "active", "limit": 500},
+            params={
+                "status": "active",
+                "limit": 500,
+                "select": "id,name,ip,status,version,lastKeepAlive,node_name,os.name,os.version",
+            },
         )
         resp.raise_for_status()
         return resp.json().get("data", {}).get("affected_items", [])

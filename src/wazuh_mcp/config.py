@@ -58,23 +58,6 @@ class Settings(BaseSettings):
     master_node_name: str = Field(default="wazuh-master", alias="WAZUH_MASTER_NODE")
     worker_node_name: str = Field(default="wazuh-worker", alias="WAZUH_WORKER_NODE")
 
-    # ── Active response safety ────────────────────────────────────
-    block_ip_default_timeout: int = Field(
-        default=3600,
-        alias="BLOCK_IP_DEFAULT_TIMEOUT",
-    )
-
-    # ── Slack (opsional — hanya untuk notifikasi, BUKAN approval) ─
-    # Dua cara kirim (pilih salah satu; webhook lebih sederhana & aman):
-    #   - SLACK_WEBHOOK_URL: Incoming Webhook, channel fixed di-setup Slack App.
-    #   - SLACK_BOT_TOKEN + SLACK_NOTIFY_CHANNEL: butuh bot di-invite ke channel.
-    slack_webhook_url: str = Field(default="", alias="SLACK_WEBHOOK_URL")
-    slack_bot_token: str = Field(default="", alias="SLACK_BOT_TOKEN")
-    slack_notify_channel: str = Field(
-        default="#soc-notifications",
-        alias="SLACK_NOTIFY_CHANNEL",
-    )
-
     # ── Audit log ─────────────────────────────────────────────────
     audit_log_path: str = Field(
         default="/var/log/wazuh-mcp/audit.log",
@@ -91,19 +74,5 @@ class Settings(BaseSettings):
         if v and not Path(v).exists():
             raise ValueError(f"CA cert file not found: {v}")
         return v
-
-    @property
-    def slack_enabled(self) -> bool:
-        return bool(self.slack_webhook_url or self.slack_bot_token)
-
-    @property
-    def slack_delivery(self) -> str:
-        """'webhook' | 'bot' | 'none'. Webhook diprioritaskan jika keduanya di-set."""
-        if self.slack_webhook_url:
-            return "webhook"
-        if self.slack_bot_token:
-            return "bot"
-        return "none"
-
 
 settings = Settings()
