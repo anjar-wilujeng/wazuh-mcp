@@ -6,7 +6,6 @@ Auth: basic auth. Topology: single cluster (master + worker).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -161,59 +160,3 @@ class WazuhIndexerClient:
                            for b in aggs.get("by_node",    {}).get("buckets", [])],
         }
 
-    async def compliance_report(
-        self,
-        framework: str = "pci_dss",
-        time_from: str = "now-7d",
-        time_to: str = "now",
-    ) -> dict[str, Any]:
-        prefix_map = {
-            "pci_dss": "pci_dss_", "hipaa": "hipaa_",
-            "gdpr": "gdpr_", "nist": "nist_800_53", "tsc": "tsc_",
-        }
-        prefix = prefix_map.get(framework.lower(), framework.lower())
-
-        result = await self._search(ALERTS_INDEX, {
-            "size": 0,
-            "query": {"bool": {"must": [
-                {"range": {"timestamp": {"gte": time_from, "lte": time_to}}},
-                {"wildcard": {"rule.groups": f"{prefix}*"}},
-            ]}},
-            "aggs": {
-                "by_requirement": {
-                    "terms": {"field": "rule.groups", "size": 50,
-                              "include": f"{prefix}.*"}
-                },
-                "by_level": {
-                    "range": {
-                        "field": "rule.level",
-                        "ranges": [
-                            {"key": "low",    "from": 1,  "to": 7},
-                            {"key": "medium", "from": 7,  "to": 12},
-                            {"key": "high",   "from": 12, "to": 16},
-                        ],
-                    }
-                },
-                "by_agent": {"terms": {"field": "agent.name", "size": 20}},
-            },
-        })
-        aggs = result.get("aggregations", {})
-        total = result.get("hits", {}).get("total", {}).get("value", 0)
-        return {
-            "framework": framework.upper(),
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "time_range": {"from": time_from, "to": time_to},
-            "total_events": total,
-            "requirements_hit": [
-                {"requirement": b["key"], "event_count": b["doc_count"]}
-                for b in aggs.get("by_requirement", {}).get("buckets", [])
-            ],
-            "severity_breakdown": {
-                b["key"]: b["doc_count"]
-                for b in aggs.get("by_level", {}).get("buckets", [])
-            },
-            "affected_agents": [
-                {"agent": b["key"], "count": b["doc_count"]}
-                for b in aggs.get("by_agent", {}).get("buckets", [])
-            ],
-        }

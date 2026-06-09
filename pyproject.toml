@@ -12,13 +12,15 @@ dependencies = [
     "httpx==0.28.1",
     "pydantic==2.11.3",
     "pydantic-settings==2.9.1",
-    "slack-sdk==3.34.0",
     "python-dotenv==1.1.0",
     "tenacity==9.1.2",
+    "uvicorn==0.44.0",
+    "starlette==1.0.0",
 ]
 
 [project.scripts]
 wazuh-mcp = "wazuh_mcp.server:main"
+wazuh-mcp-http = "wazuh_mcp.server:main_http"
 
 [tool.setuptools.packages.find]
 where = ["src"]
