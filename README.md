@@ -1,50 +1,61 @@
 # Wazuh MCP Server untuk Tim SOC
 
-MCP (Model Context Protocol) server yang menghubungkan **Claude Desktop** dengan **Wazuh SIEM**.
+MCP (Model Context Protocol) server **read-only** yang menghubungkan **Claude**
+(Claude Code / Claude Desktop) dengan **Wazuh SIEM** untuk triase & analisis alert.
 
-**Topology:** Single cluster, satu master node + satu worker node.  
-**Auth:** Basic auth (username + password).  
-**Approval flow:** Konfirmasi manual di Claude Desktop — tidak perlu tool eksternal.
+**Topology:** Single cluster, satu master node + satu worker node.
+**Auth:** Basic auth (Indexer) + token auth (Manager API).
+**Sifat:** Murni read-only & analitik — tidak ada tool yang mengubah state.
+
+> Posting hasil ke Slack ditangani oleh bot eksternal (`blue-agent`), **bukan** oleh
+> MCP ini. MCP hanya menyediakan data Wazuh.
 
 ---
 
 ## Tools yang Tersedia
 
-| Tool | Deskripsi | Approval? |
-|------|-----------|-----------|
-| `query_alerts` | Query alerts dengan filter severity, agent, IP, waktu | Tidak |
-| `query_vulnerabilities` | Query CVE dan vuln data | Tidak |
-| `get_alert_summary` | Statistik harian + breakdown per node | Tidak |
-| `compliance_report` | Report PCI DSS / HIPAA / GDPR / NIST / TSC | Tidak |
-| `block_ip` | Block IP via active response (firewall-drop) | **Ya — confirm di Claude Desktop** |
-| `list_agents` | Daftar agents aktif dari master + worker | Tidak |
-| `get_cluster_status` | Status node master dan worker | Tidak |
+Semua read-only — tidak ada konfirmasi/approval karena tidak ada aksi destruktif.
+
+| Tool | Deskripsi |
+|------|-----------|
+| `query_alerts` | Query alerts dengan filter severity, agent, rule id, IP, rentang waktu |
+| `query_vulnerabilities` | Query CVE / vulnerability data per agent |
+| `get_alert_summary` | Statistik ringkas: per severity, top rules, top agents, per node |
+| `list_agents` | Daftar agents aktif (field di-trim untuk efisiensi — lihat catatan) |
+| `get_cluster_status` | Status node master & worker |
+
+> **Catatan efisiensi `list_agents`:** payload dipangkas di sisi Wazuh via parameter
+> `select` (hanya `id,name,ip,status,version,lastKeepAlive,node_name,os.name,os.version`),
+> memangkas respons ~65% agar model membaca lebih sedikit & lebih cepat.
 
 ---
 
 ## Arsitektur
 
+Dua transport tersedia. Untuk pemakaian terus-menerus (mis. bot SOC), gunakan
+**daemon HTTP persisten** agar MCP tidak cold-start (spawn ulang Python) tiap panggilan.
+
 ```
-Claude Desktop (SOC Analyst)
+Claude Code (claude -p) / Claude Desktop / blue-agent bot
     │
-    │  stdio (MCP protocol)
-    ▼
-Wazuh MCP Server (Python)
-    │
-    ├── query_* ─────────────────────────► Wazuh Indexer :9200 (master)
-    │                                       └─ shard otomatis ke worker
-    │
-    ├── list_agents / cluster_status ────► Wazuh Manager :55000 (master)
-    │
-    └── block_ip
-          │
-          ├─ 1. Claude tampilkan detail & minta konfirmasi
-          ├─ 2. SOC analyst ketik "ya" / "lanjutkan"
-          ├─ 3. Eksekusi → Wazuh Manager :55000 (master)
-          │              └─ master forward ke worker otomatis
-          ├─ 4. Audit log ke file (persisten)
-          └─ 5. Notifikasi Slack (opsional)
+    ├─ stdio  (per-panggilan, via run-mcp.sh) ───────┐
+    │                                                 │
+    └─ HTTP   (daemon persisten, :8765, via          │
+              run-mcp-http.sh + manage-http.sh) ──────┤
+                                                      ▼
+                                          Wazuh MCP Server (Python)
+                                                      │
+       query_alerts / vulnerabilities / summary ─────► Wazuh Indexer :9200
+                                                      │
+       list_agents / cluster_status ─────────────────► Wazuh Manager :55000
+                                                      │
+                                          Audit log persisten (file, rotasi 50MB×10)
 ```
+
+- **stdio** — Claude men-spawn proses MCP baru tiap sesi (sederhana, tapi ada
+  cold-start ~1–3 dtk per panggilan).
+- **HTTP daemon** — proses MCP tetap hidup; klien connect via `--mcp-config`.
+  Tidak ada spawn ulang Python per panggilan.
 
 ---
 
@@ -55,15 +66,17 @@ wazuh-mcp/
 ├── src/
 │   └── wazuh_mcp/
 │       ├── __init__.py
-│       ├── server.py           # MCP server entry point
-│       ├── config.py           # Pydantic settings
-│       ├── manager_client.py   # Wazuh Manager API client
-│       └── indexer_client.py   # Wazuh Indexer client
+│       ├── server.py           # MCP server: tools + entry point stdio (main) & HTTP (main_http)
+│       ├── config.py           # Pydantic settings (.env)
+│       ├── manager_client.py   # Wazuh Manager API client (token auth)
+│       └── indexer_client.py   # Wazuh Indexer client (basic auth)
+├── run-mcp.sh                  # Wrapper stdio (load .env → wazuh-mcp)
+├── run-mcp-http.sh             # Wrapper daemon HTTP (load .env → wazuh-mcp-http)
+├── manage-http.sh              # Kelola daemon HTTP: start/stop/restart/status/ensure
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
 ├── .env.example
-├── claude_desktop_config.example.json
 └── README.md
 ```
 
@@ -73,17 +86,22 @@ wazuh-mcp/
 
 ### 1. Install
 
+Project ini memakai virtualenv (dibuat dengan `uv`):
+
 ```bash
-git clone <repo>
+git clone https://github.com/anjar-wilujeng/wazuh-mcp.git
 cd wazuh-mcp
-pip install -e .
+uv venv .venv
+uv pip install -e . --python .venv/bin/python
 ```
+
+Console script yang terdaftar: `wazuh-mcp` (stdio) dan `wazuh-mcp-http` (daemon HTTP).
 
 ### 2. Konfigurasi
 
 ```bash
 cp .env.example .env
-nano .env   # Sesuaikan URL, username, password
+nano .env
 ```
 
 **Konfigurasi minimum:**
@@ -91,139 +109,107 @@ nano .env   # Sesuaikan URL, username, password
 ```env
 WAZUH_INDEXER_URL=https://wazuh-master:9200
 WAZUH_MANAGER_URL=https://wazuh-master:55000
-WAZUH_USERNAME=admin
+WAZUH_USERNAME=admin            # auth Indexer (wajib)
 WAZUH_PASSWORD=PASSWORD_ANDA
 WAZUH_VERIFY_SSL=true
 ```
 
-### 3. Claude Desktop
+**Opsional:**
 
-Edit config Claude Desktop:
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+```env
+# Kredensial Manager terpisah (jika beda dgn Indexer; default fallback ke WAZUH_USERNAME/PASSWORD)
+WAZUH_MANAGER_USERNAME=
+WAZUH_MANAGER_PASSWORD=
+
+WAZUH_CA_CERT_PATH=             # path CA cert; kalau di-set, dipakai untuk verifikasi TLS
+WAZUH_CLUSTER_NAME=wazuh-cluster
+WAZUH_MASTER_NODE=wazuh-master
+WAZUH_WORKER_NODE=wazuh-worker
+AUDIT_LOG_PATH=/var/log/wazuh-mcp/audit.log
+LOG_LEVEL=INFO
+MAX_ALERTS_PER_QUERY=100
+
+# Daemon HTTP (default 127.0.0.1:8765)
+WAZUH_MCP_HTTP_HOST=127.0.0.1
+WAZUH_MCP_HTTP_PORT=8765
+```
+
+### 3a. Pakai via stdio (Claude Desktop / Claude Code)
+
+Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`
+di macOS, `%APPDATA%\Claude\claude_desktop_config.json` di Windows):
 
 ```json
 {
   "mcpServers": {
     "wazuh-soc": {
-      "command": "wazuh-mcp",
-      "env": {
-        "WAZUH_INDEXER_URL": "https://wazuh-master:9200",
-        "WAZUH_MANAGER_URL": "https://wazuh-master:55000",
-        "WAZUH_USERNAME": "admin",
-        "WAZUH_PASSWORD": "PASSWORD_ANDA",
-        "WAZUH_VERIFY_SSL": "true"
-      }
+      "command": "/path/ke/wazuh-mcp/run-mcp.sh"
     }
   }
 }
 ```
 
-Restart Claude Desktop setelah edit.
+`run-mcp.sh` me-load `.env` lalu menjalankan `wazuh-mcp`. Restart Claude setelah edit.
 
-### 4. Docker (production)
+### 3b. Pakai via daemon HTTP (disarankan untuk bot / pemakaian terus-menerus)
 
 ```bash
-# Cek nama network Docker Wazuh yang sudah ada
-docker network ls | grep wazuh
+# Nyalakan daemon (load .env, listen 127.0.0.1:8765)
+./manage-http.sh start
+./manage-http.sh status        # cek RUNNING
+```
 
-# Konfigurasi
-cp .env.example .env
-nano .env
+Lalu arahkan Claude ke daemon (mis. dari `claude -p`):
 
-# Build & run sebagai sidecar
+```bash
+claude -p "..." \
+  --mcp-config '{"mcpServers":{"wazuh-soc":{"type":"http","url":"http://127.0.0.1:8765/mcp"}}}' \
+  --strict-mcp-config
+```
+
+Perintah `manage-http.sh`: `start | stop | restart | status | ensure | log`
+(`ensure` = start hanya jika belum jalan; cocok dipanggil dari skrip lain saat boot).
+
+### 4. Docker
+
+```bash
+docker network ls | grep wazuh   # cek network Wazuh yang ada
+cp .env.example .env && nano .env
 docker compose up -d
 ```
 
 ---
 
-## Safety: block_ip
-
-`block_ip` memiliki beberapa lapisan keamanan:
-
-1. **Human-in-the-loop** — Claude wajib menampilkan detail dan meminta konfirmasi eksplisit sebelum eksekusi
-2. **Agent wajib spesifik** — tidak ada default "semua agents", harus menyebutkan agent ID
-3. **Default timeout 1 jam** — block otomatis expire, bukan permanen
-4. **IP validation** — menggunakan Python `ipaddress` stdlib (mendukung IPv4 & IPv6)
-5. **Audit log persisten** — setiap eksekusi dicatat ke file (rotasi 50MB x 10 file)
-6. **Slack notifikasi** — opsional, melaporkan status berhasil/gagal
-
----
-
-## Cara Pakai di Claude Desktop
+## Cara Pakai (contoh prompt)
 
 ### Query alerts
-
 ```
 Tampilkan alert severity high dan critical dari 24 jam terakhir
-```
-
-```
 Ada alert apa saja untuk IP 10.0.0.5 dalam 7 hari terakhir?
 ```
 
 ### Vulnerability check
-
 ```
 Tampilkan semua CVE critical di agent web-prod-01
 ```
 
 ### Daily briefing
-
 ```
 Buatkan summary alert hari ini, breakdown per node cluster
 ```
 
-### Compliance
-
+### Agents & cluster
 ```
-Generate compliance report PCI DSS untuk 7 hari terakhir
-```
-
-### Block IP — flow konfirmasi
-
-```
-SOC: Block IP 185.220.101.5 — brute force SSH ke 3 server sejak 2 jam lalu
-
-Claude: Saya akan melakukan block IP dengan detail berikut:
-        ┌─────────────────────────────────────────┐
-        │ KONFIRMASI REQUIRED                      │
-        │ IP Target : 185.220.101.5               │
-        │ Aksi      : firewall-drop               │
-        │ Agents    : 001, 003, 007               │
-        │ Durasi    : 3600s (1 jam)               │
-        │ Alasan    : Brute force SSH             │
-        │ Node      : master → worker (otomatis)  │
-        └─────────────────────────────────────────┘
-        Ketik "ya" untuk melanjutkan atau "batal" untuk membatalkan.
-
-SOC: ya
-
-Claude: [eksekusi block_ip] IP 185.220.101.5 berhasil di-block di agents 001, 003, 007.
-        Block akan expire dalam 1 jam.
+Daftar agent yang aktif sekarang
+Status cluster Wazuh sehat?
 ```
 
 ---
 
-## Slack Notifikasi (Opsional)
+## Audit Log
 
-Slack hanya digunakan untuk **notifikasi pasca-eksekusi**, bukan untuk approval.
-Approval tetap dilakukan manual di Claude Desktop.
-
-Dua cara konfigurasi — pilih salah satu:
-
-```env
-# Opsi A (direkomendasikan): Incoming Webhook — channel fixed, simpel & aman
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
-
-# Opsi B: Bot token — bot harus di-invite ke channel
-SLACK_BOT_TOKEN=xoxb-xxx
-SLACK_NOTIFY_CHANNEL=#soc-notifications
-```
-
-Scopes yang diperlukan untuk Opsi B: `chat:write`. Jika keduanya di-set, webhook diprioritaskan.
-
-Tool `send_alerts_to_slack` mengirim ringkasan alert (summary + top-N list) ke channel — pesan posting sebagai **bot/app**, bukan akun user, sehingga aman dari perspektif privasi.
+Setiap panggilan tool dicatat ke file audit (`AUDIT_LOG_PATH`, rotasi 50MB × 10 file).
+Berguna untuk jejak siapa menanyakan apa, kapan.
 
 ---
 
@@ -231,31 +217,30 @@ Tool `send_alerts_to_slack` mengirim ringkasan alert (summary + top-N list) ke c
 
 | Masalah | Solusi |
 |---------|--------|
-| Tools tidak muncul di Claude Desktop | Cek JSON syntax `claude_desktop_config.json`, restart Claude |
-| Connection refused ke Indexer/Manager | Pastikan container MCP di network Docker yang sama dengan Wazuh |
-| SSL error | Set `WAZUH_VERIFY_SSL=false` untuk self-signed cert (dev only) |
-| `Authentication failed` | Cek username/password di `.env` |
-| `block_ip` tidak jalan | Pastikan Wazuh Manager API aktif dan agents punya active response module |
-| `agents wajib diisi` | Jalankan `list_agents` dulu untuk mendapatkan agent ID |
+| Tools tidak muncul | Cek path `run-mcp.sh` di config, pastikan executable; restart klien |
+| `AttributeError ... settings.X` saat start | `.env`/kode tidak konsisten — cek `config.py` vs referensi di `server.py` |
+| Daemon HTTP tak bisa connect | `./manage-http.sh status`; cek `mcp-http.log`; pastikan port 8765 listen |
+| Connection refused ke Indexer/Manager | Pastikan URL benar & MCP di network yang sama dengan Wazuh |
+| SSL error | Set `WAZUH_VERIFY_SSL=false` untuk self-signed (dev only) atau set `WAZUH_CA_CERT_PATH` |
+| `Authentication failed` | Cek `WAZUH_USERNAME/PASSWORD` (dan `WAZUH_MANAGER_*` bila terpisah) |
 
 ---
 
 ## Roadmap
 
-### MVP (sekarang)
-- Query alerts, vulnerabilities, summary, compliance
-- block_ip dengan manual confirm + audit log
+### Sekarang
+- 5 tool read-only: query alerts / vulnerabilities / summary / list agents / cluster status
+- Dua transport: stdio (per-panggilan) & HTTP daemon (persisten)
+- Payload `list_agents` di-trim via `select` (efisiensi token & latensi)
+- Audit log persisten
 - Single cluster master + worker
-- Slack notifikasi opsional
-- Container hardening (non-root, cap_drop, read-only fs)
 
-### v2
-- `unblock_ip` — undo active response
+### Berikutnya (ide)
 - `get_agent_detail` — detail satu agent spesifik
+- IP enrichment (VirusTotal / AbuseIPDB) untuk konteks triase
 - Rate limiting per tool
 - SIEM forwarding untuk audit log
 
-### v3
-- Integrasi TheHive / JIRA untuk case management
-- IP enrichment via VirusTotal / AbuseIPDB
-- Scheduled Slack reports
+> **Catatan historis:** versi awal sempat punya `block_ip` (active response),
+> `compliance_report`, dan `send_alerts_to_slack`. Semua dibuang demi menjaga MCP
+> tetap read-only/analitik; posting Slack kini ditangani bot eksternal (`blue-agent`).
