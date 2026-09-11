@@ -170,6 +170,10 @@ claude -p "..." \
 Perintah `manage-http.sh`: `start | stop | restart | status | ensure | log`
 (`ensure` = start hanya jika belum jalan; cocok dipanggil dari skrip lain saat boot).
 
+Untuk deployment persisten yang punya systemd, pakai template di
+`deploy/wazuh-mcp-http.service.example` (isi placeholder `<INSTALL_DIR>`/`<SERVICE_USER>`)
+daripada `nohup` + crontab `@reboot`.
+
 ### 4. Docker
 
 ```bash

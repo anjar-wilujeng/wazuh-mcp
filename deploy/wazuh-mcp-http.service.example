@@ -1,0 +1,29 @@
+# Template systemd unit untuk daemon MCP HTTP persisten (wazuh-mcp-http).
+#
+# Cara pakai:
+#   1. Copy ke /etc/systemd/system/wazuh-mcp-http.service
+#   2. Ganti <INSTALL_DIR> (mis. /opt/wazuh-mcp) dan <SERVICE_USER> (mis. blue-agent)
+#   3. Pastikan <INSTALL_DIR>/.env sudah diisi & WAZUH_MANAGER_URL/WAZUH_INDEXER_URL
+#      menunjuk ke cluster yang BENAR (jangan copy dari host lama tanpa dicek —
+#      lihat catatan migrasi di README utama).
+#   4. systemctl daemon-reload && systemctl enable --now wazuh-mcp-http
+#
+# Konsumen (blue-agent, claude -p) connect ke http://<WAZUH_MCP_HTTP_HOST>:<PORT>/mcp
+# lewat --mcp-config, bukan spawn stdio — supaya tidak cold-start Python tiap panggilan.
+
+[Unit]
+Description=wazuh-mcp HTTP daemon (persistent MCP server for Wazuh triage)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<SERVICE_USER>
+WorkingDirectory=<INSTALL_DIR>
+EnvironmentFile=<INSTALL_DIR>/.env
+ExecStart=<INSTALL_DIR>/.venv/bin/wazuh-mcp-http
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
